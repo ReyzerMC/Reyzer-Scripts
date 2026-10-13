@@ -1,4 +1,5 @@
 import argparse
+import difflib
 import os
 import platform
 import subprocess
@@ -26,22 +27,87 @@ def rebuild_qs():
     elif os.path.exists("/usr/bin/paru"):
         subprocess.run(["paru", "-S", "--noconfirm", "quickshell-git"])
 
+def merge_preserved_lines(original_lines: list[str], new_lines: list[str]) -> list[str]:
+    flagged_indices = [
+        index for index, line in enumerate(original_lines)
+        if "-- no-rm flag" in line
+    ]
+    if not flagged_indices:
+        return new_lines
+
+    flagged_set = set(flagged_indices)
+    match_lines = [
+        None if index in flagged_set else line
+        for index, line in enumerate(original_lines)
+    ]
+    matching_lines: dict[int, int] = {}
+    matcher = difflib.SequenceMatcher(None, match_lines, new_lines, autojunk=False)
+    for original_start, new_start, size in matcher.get_matching_blocks():
+        for offset in range(size):
+            matching_lines[original_start + offset] = new_start + offset
+
+    groups: list[tuple[int, int]] = []
+    for index in flagged_indices:
+        if groups and index == groups[-1][1]:
+            groups[-1] = (groups[-1][0], index + 1)
+        else:
+            groups.append((index, index + 1))
+
+    insertions: list[tuple[int, int, list[str]]] = []
+    for start, end in groups:
+        previous = next(
+            (index for index in reversed(matching_lines) if index < start),
+            None,
+        )
+        following = next(
+            (index for index in matching_lines if index >= end),
+            None,
+        )
+        if previous is None and following is None:
+            raise ValueError(
+                f"Cannot safely locate preserved line {start + 1} in the updated file"
+            )
+
+        if following is None or (
+            previous is not None and start - previous <= following - end + 1
+        ):
+            target = matching_lines[previous] + 1
+        else:
+            target = matching_lines[following]
+        insertions.append((target, start, original_lines[start:end]))
+
+    for target, _, lines in sorted(
+        insertions,
+        key=lambda item: (item[0], item[1]),
+        reverse=True,
+    ):
+        new_lines[target:target] = lines
+    return new_lines
+
 def merge_configs():
-    flaggedLines: dict[str, int] = {}
     config_dir = os.path.expanduser("~/.config/hypr/")
-    for file in os.listdir(config_dir):
-        if file.endswith(".lua.new"):
-            original_file = file[:-4] # Modified file without the .new extension because of user's additional configs
-            for lines in open(os.path.join(config_dir, original_file), 'r'):
-                for line in lines:
-                    if line.endswith("-- no-rm flag"):
-                        flaggedLines.pop(line, line.index) # Save line and position to add it later to the new config file
-            with open(os.path.join(config_dir, file), 'r') as new_file:
-                # Add flagged lines to the new config file
-                new_lines = new_file.readlines()
-                for line, index in flaggedLines.items():
-                    new_lines.insert(index, line)
-            os.replace(os.path.join(config_dir, file), os.path.join(config_dir, original_file))             
+    updates: list[tuple[str, str, list[str]]] = []
+    for file in sorted(os.listdir(config_dir)):
+        if not file.endswith(".lua.new"):
+            continue
+
+        new_path = os.path.join(config_dir, file)
+        original_path = os.path.join(config_dir, file[:-4])
+        with open(original_path, "r") as original_file:
+            original_lines = original_file.readlines()
+        with open(new_path, "r") as new_file:
+            new_lines = new_file.readlines()
+
+        try:
+            merged_lines = merge_preserved_lines(original_lines, new_lines)
+        except ValueError as error:
+            raise ValueError(f"{file}: {error}") from error
+        updates.append((new_path, original_path, merged_lines))
+
+    for new_path, original_path, merged_lines in updates:
+        with open(new_path, "w") as new_file:
+            new_file.writelines(merged_lines)
+        os.replace(new_path, original_path)
 
 if args.rebuild:
     rebuild_qs()
