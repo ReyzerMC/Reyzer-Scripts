@@ -13,7 +13,7 @@ parser.add_argument('-M', '--merge', action='store_true', help='Merge new config
 args = parser.parse_args()
 
 if "arch" not in kernel_version:
-    print("This script is intended for Arch Linux or Arch-based distributions.")
+    print("This script is intended for Arch Linux or Arch-based distributions, but not for cachy OS.")
     exit(1)
 
 def rebuild_qs():
